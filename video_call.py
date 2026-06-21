@@ -2230,6 +2230,23 @@ async def _query_bio_from_db(chat_id: int, user_id: int) -> tuple[bool | None, b
             f"[UB-Bio] chat={chat_id} uid={user_id} "
             f"has_link={result} (fresh dari bot pemantau)"
         )
+
+    # ── Bio Admin Wajib (NewsCore) — independen dari hasil has_link di atas.
+    # force_check_vc_join (lewat check_and_save_vc → check_and_save) sudah
+    # menulis field admin_bio_ok ke bio_profiles untuk user ini jika relevan.
+    # Tidak mempengaruhi mute/unmute mic VC sama sekali — hanya unadmin.
+    try:
+        from monitor_bot_reference import query_admin_bio_ok
+        admin_bio_ok = await query_admin_bio_ok(chat_id, user_id)
+        if admin_bio_ok is False and _bot_ref:
+            from core.ns_bio_guard import enforce_admin_bio
+            _safe_task(
+                enforce_admin_bio(_bot_ref, chat_id, user_id, admin_bio_ok),
+                tag="ns-bio-guard-vc",
+            )
+    except Exception as e:
+        print(f"[NS-BioGuard] gagal cek admin_bio_ok via VC chat={chat_id} uid={user_id}: {e}")
+
     return result, False
 
 

@@ -380,6 +380,17 @@ class MonitorInstance:
         has_link = bool(LINK_PATTERN.search(bio_text))
         self._last_checked[user_id] = now
 
+        # ── Bio Admin Wajib (NewsCore) ────────────────────────────────────────
+        # Hanya relevan jika user ini adalah admin yang diangkat NewsCore.
+        # True/False = hasil cek teks wajib. None = bukan admin NewsCore,
+        # tidak relevan, tidak ditindaklanjuti oleh bot utama.
+        try:
+            from core.ns_bio_guard import check_admin_bio_text
+            admin_bio_ok = await check_admin_bio_text(self.chat_id, user_id, bio_text)
+        except Exception as e:
+            print(f"[Monitor {self.chat_id}] gagal cek admin_bio_ok uid={user_id}: {e}")
+            admin_bio_ok = None
+
         old_doc      = await bio_col.find_one(
             {"chat_id": self.chat_id, "user_id": user_id}
         )
@@ -396,13 +407,14 @@ class MonitorInstance:
         await bio_col.update_one(
             {"chat_id": self.chat_id, "user_id": user_id},
             {"$set": {
-                "chat_id":    self.chat_id,
-                "user_id":    user_id,
-                "has_link":   has_link,
-                "bio":        bio_text[:500],
-                "checked_at": now,
-                "updated_at": updated_at,
-                "expires_at": expires_at,   # ← TTL MongoDB
+                "chat_id":      self.chat_id,
+                "user_id":      user_id,
+                "has_link":     has_link,
+                "bio":          bio_text[:500],
+                "checked_at":   now,
+                "updated_at":   updated_at,
+                "expires_at":   expires_at,   # ← TTL MongoDB
+                "admin_bio_ok": admin_bio_ok,  # True/False/None — lihat ns_bio_guard.py
             }},
             upsert=True,
         )
@@ -753,6 +765,35 @@ async def query_bio(chat_id: int, user_id: int) -> bool | None:
         return None
 
     return doc.get("has_link", False)
+
+
+async def query_admin_bio_ok(chat_id: int, user_id: int) -> bool | None:
+    """
+    Baca hasil cek "Bio Admin Wajib" (NewsCore) dari DB untuk pasangan
+    (chat_id, user_id). Ditulis bersamaan dengan has_link oleh
+    MonitorInstance.check_and_save() — lihat field admin_bio_ok.
+
+    Return:
+      True  → user adalah admin NewsCore aktif & bio memenuhi teks wajib
+      False → user adalah admin NewsCore aktif & bio TIDAK memenuhi teks wajib
+              → bot utama harus panggil core.ns_bio_guard.enforce_admin_bio()
+      None  → bukan admin NewsCore / data belum ada — tidak perlu tindakan
+    """
+    try:
+        doc = await bio_col.find_one(
+            {"chat_id": chat_id, "user_id": user_id}
+        )
+    except Exception as e:
+        print(
+            f"[MonitorQuery] Gagal query admin_bio_ok "
+            f"chat={chat_id} uid={user_id}: {e}"
+        )
+        return None
+
+    if not doc:
+        return None
+
+    return doc.get("admin_bio_ok")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

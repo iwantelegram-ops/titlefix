@@ -2204,6 +2204,25 @@ NEWSCORE_DEFAULT = {
     "reset_minute":   59,
     "max_admins":     1,
     "next_reset":     None,
+    "bio_admin_text": "",   # Teks wajib di bio admin yang diangkat NewsCore.
+    "bio_admin_required": True,  # False = sengaja dikosongkan via tombol "Kosongkan"
+                             # → admin NewsCore TIDAK diwajibkan apapun di bio.
+                             # True + bio_admin_text kosong (default awal, belum
+                             # pernah diatur sama sekali) = dianggap wajib tapi
+                             # mustahil dipenuhi (semua admin NewsCore di-unadmin
+                             # sampai diisi ATAU sampai owner pilih "Kosongkan").
+    "admin_title": "",      # Titel custom (maks 16 karakter) yang dipasang via
+                             # set_administrator_title saat admin
+                             # diangkat NewsCore tiap periode reset. Kosong =
+                             # pakai titel default bawaan ("Top Member N 👑").
+    "auto_title_enabled": False,  # Auto Title Member: tag otomatis (via Bot API
+                             # setChatMemberTag) untuk member NON-admin berdasar
+                             # rank typing/leaderboard NewsCore, dipasang bareng
+                             # ns_do_reset(). Beda dari admin_title (itu khusus
+                             # admin yang diangkat NewsCore).
+    "auto_title_names": [],  # List hingga 10 nama tag, urut per kelompok rank
+                             # 5 besar: index 0 -> rank 1-5, index 1 -> rank 6-10,
+                             # dst. Kosong = fitur tidak aktif walau enabled=True.
     "privileges": {
         "can_delete_messages":   True,
         "can_restrict_members":  True,
@@ -2321,4 +2340,12 @@ async def ns_set_current_admins(chat_id: int, admins: list) -> None:
             await newscore_admin_db.insert_many(admins)
     except Exception as e:
         print(f"[NewsCore] set admins error: {e}")
+
+
+async def ns_remove_admin(chat_id: int, user_id: int) -> None:
+    """Hapus satu admin NewsCore dari daftar admin aktif (tanpa menyentuh admin lain)."""
+    try:
+        await newscore_admin_db.delete_many({"chat_id": chat_id, "user_id": user_id})
+    except Exception as e:
+        print(f"[NewsCore] remove admin error: {e}")
 

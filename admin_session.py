@@ -156,3 +156,39 @@ async def start_cleanup_task() -> None:
             _sessions.pop(k, None)
         if expired:
             print(f"[admin_session] cleanup: {len(expired)} sesi kedaluwarsa dihapus.")
+
+
+async def has_change_info_privilege(client: Client, user_id: int, chat_id: int) -> bool:
+    """
+    Cek apakah user adalah admin grup DENGAN hak "Ubah Info Grup"
+    (can_change_info) secara spesifik — bukan sekadar status admin.
+
+    Dipakai untuk tombol-tombol yang butuh hak lebih tinggi dari admin
+    biasa, mis. "Bio Admin Wajib" di panel NewsCore.
+
+    OWNER grup selalu dianggap punya hak ini (owner punya semua hak
+    implisit meski field privileges Telegram bisa bernilai None untuk
+    status OWNER).
+
+    Return True jika OWNER, atau ADMINISTRATOR dengan can_change_info=True.
+    Return False untuk member biasa, admin tanpa hak tersebut, atau jika
+    gagal verifikasi (mis. user bukan lagi partisipan grup).
+    """
+    try:
+        member = await client.get_chat_member(chat_id, user_id)
+    except (UserNotParticipant, ChatAdminRequired, PeerIdInvalid):
+        return False
+    except Exception:
+        return False
+
+    if member.status == ChatMemberStatus.OWNER:
+        return True
+
+    if member.status != ChatMemberStatus.ADMINISTRATOR:
+        return False
+
+    privileges = getattr(member, "privileges", None)
+    if privileges is None:
+        return False
+
+    return bool(getattr(privileges, "can_change_info", False))
