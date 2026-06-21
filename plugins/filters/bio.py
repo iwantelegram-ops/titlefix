@@ -123,6 +123,55 @@ def _update_mem_cache(chat_id: int, user_id: int, has_link: bool) -> None:
     _mem_cache[(chat_id, user_id)] = (has_link, time.monotonic())
 
 
+# ── Bio Admin Wajib (NewsCore) ──────────────────────────────────────────────
+# Throttle ringan khusus pengecekan ini, terpisah dari _mem_cache (yang
+# menyimpan has_link), agar tidak ada interaksi tak sengaja antar fitur.
+_ns_bio_check_ts: dict[tuple[int, int], float] = {}
+_NS_BIO_CHECK_COOLDOWN = _MEM_CACHE_TTL  # ikut TTL bio yang sama
+
+
+async def _check_ns_admin_bio(client: Client, chat_id: int, user_id: int) -> None:
+    """
+    Dipicu setiap ada pesan dari user di grup (group=1, sebelum skip-admin).
+    Jika user adalah admin NewsCore aktif → pastikan bio sudah dicek fresh,
+    baca hasil admin_bio_ok, lalu unadmin via core.ns_bio_guard jika perlu.
+
+    Tidak mempengaruhi pesan yang sedang diproses sama sekali (tidak hapus,
+    tidak mark_message_handled) — berjalan independen sebagai background task.
+    """
+    try:
+        from database import ns_get_config, ns_get_current_admins
+        ns_cfg = await ns_get_config(chat_id)
+        if not ns_cfg.get("enabled"):
+            return
+
+        ns_admins = await ns_get_current_admins(chat_id)
+        if user_id not in {a["user_id"] for a in ns_admins}:
+            return  # bukan admin NewsCore — tidak relevan
+
+        # Throttle agar tidak query/trigger berulang dalam waktu singkat
+        now = time.monotonic()
+        key = (chat_id, user_id)
+        last = _ns_bio_check_ts.get(key, 0)
+        if now - last < _NS_BIO_CHECK_COOLDOWN:
+            return
+        _ns_bio_check_ts[key] = now
+
+        from monitor_bot_reference import query_admin_bio_ok, force_check_user
+        admin_bio_ok = await query_admin_bio_ok(chat_id, user_id)
+        if admin_bio_ok is None:
+            # Data belum ada / expired → paksa bot pemantau cek fresh
+            # (force_check_user juga otomatis menulis admin_bio_ok)
+            await force_check_user(chat_id, user_id)
+            admin_bio_ok = await query_admin_bio_ok(chat_id, user_id)
+
+        if admin_bio_ok is False:
+            from core.ns_bio_guard import enforce_admin_bio
+            await enforce_admin_bio(client, chat_id, user_id, admin_bio_ok)
+    except Exception as e:
+        print(f"[NS-BioGuard] _check_ns_admin_bio error chat={chat_id} uid={user_id}: {e}")
+
+
 # ── Handler pesan masuk ────────────────────────────────────────────────────────
 
 @Client.on_message(filters.group & ~filters.service, group=1)
@@ -138,6 +187,12 @@ async def bio_filter(client: Client, message: Message):
         return
 
     cfg = await get_config(cid)
+
+    # ── Bio Admin Wajib (NewsCore) — dicek SEBELUM skip-admin di bawah,
+    # karena justru admin (yang diangkat NewsCore) yang perlu diperiksa di sini.
+    # Tidak menghapus pesan ini sama sekali — hanya trigger unadmin jika perlu.
+    asyncio.create_task(_check_ns_admin_bio(client, cid, uid))
+
     if not cfg["bio_check"]:
         return
 
@@ -239,6 +294,10 @@ async def bio_typing_handler(client: Client, update, users, chats):
         if now - last_trigger < _TYPING_TRIGGER_COOLDOWN:
             return
         _typing_trigger_ts[key] = now
+
+        # ── Bio Admin Wajib (NewsCore) — independen dari toggle bio_check
+        # member di bawah, karena ini soal kewajiban admin, bukan filter link.
+        asyncio.create_task(_check_ns_admin_bio(client, chat_id, user_id))
 
         # Cek konfigurasi bio_check aktif di grup ini
         try:
