@@ -14,6 +14,7 @@ FIXED: page_group_log sekarang return HTML murni (bukan marker [BQ]) sehingga
 """
 
 import os
+from html import escape as _html_escape
 from datetime import datetime, timezone
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import get_config, db, get_group_action_log_page, TZ_WIB as _TZ_WIB, get_bot_config, get_regex_count, get_free_count, invalidate_count_cache
@@ -939,6 +940,30 @@ async def page_newscore(chat_id: int):
         for k, label in PLABELS.items()
     )
 
+    bio_admin_text     = (cfg.get("bio_admin_text") or "").strip()
+    bio_admin_required = cfg.get("bio_admin_required", True)
+    if not bio_admin_required:
+        bio_admin_line = "➖ <code>Tidak diwajibkan (dikosongkan oleh admin)</code>"
+    elif bio_admin_text:
+        bio_admin_line = f"✅ <code>{_html_escape(bio_admin_text[:40])}</code>"
+    else:
+        bio_admin_line = "❌ <code>(belum diisi — semua admin NewsCore akan di-unadmin)</code>"
+
+    admin_title = (cfg.get("admin_title") or "").strip()
+    if admin_title:
+        admin_title_line = f"✅ <code>{_html_escape(admin_title)}</code>"
+    else:
+        admin_title_line = "➖ <code>(belum diatur — pakai titel default)</code>"
+
+    auto_title_enabled = cfg.get("auto_title_enabled", False)
+    auto_title_names   = [n for n in cfg.get("auto_title_names", []) if n and n.strip()]
+    if auto_title_enabled and auto_title_names:
+        auto_title_line = f"✅ <code>ON — {len(auto_title_names)} nama diatur</code>"
+    elif auto_title_enabled:
+        auto_title_line = "⚠️ <code>ON — tapi belum ada nama diisi</code>"
+    else:
+        auto_title_line = "➖ <code>OFF</code>"
+
     text = (
         f"🏆 <b>NEWSCORE — Skor Keaktifan & Admin Otomatis</b>\n"
         f"<code>Grup: {chat_id}</code>\n"
@@ -950,6 +975,12 @@ async def page_newscore(chat_id: int):
         f"   👑 Kuota Admin: <code>Top {cfg.get('max_admins', 1)}</code> teratas\n"
         f"{next_str}\n\n"
         f"🛡️ <b>Hak Akses Admin Baru:</b>\n{priv_lines}\n\n"
+        f"📝 <b>Bio Admin Wajib:</b>  {bio_admin_line}\n"
+        f"<i>   Admin NewsCore wajib punya teks ini di bio, atau di-unadmin.</i>\n\n"
+        f"🎖️ <b>Titel Admin:</b>  {admin_title_line}\n"
+        f"<i>   Titel ini dipasang otomatis ke admin yang diangkat NewsCore.</i>\n\n"
+        f"🏷️ <b>Auto Title Member:</b>  {auto_title_line}\n"
+        f"<i>   Tag otomatis untuk member biasa (non-admin) berdasar rank typing.</i>\n\n"
         f"<i>Ketik /ns_score di grup untuk lihat leaderboard.</i>"
     )
 
@@ -964,6 +995,9 @@ async def page_newscore(chat_id: int):
         ],
         [InlineKeyboardButton("⏰ Jam Reset",        callback_data=f"ns_time_{chat_id}")],
         [InlineKeyboardButton("🛡️ Hak Admin Baru",  callback_data=f"ns_privs_{chat_id}")],
+        [InlineKeyboardButton("📝 Bio Admin Wajib",  callback_data=f"ns_bioadmin_{chat_id}")],
+        [InlineKeyboardButton("🎖️ Titel Admin",     callback_data=f"ns_admintitle_{chat_id}")],
+        [InlineKeyboardButton("🏷️ Auto Title Member", callback_data=f"ns_autotitle_{chat_id}")],
         [InlineKeyboardButton("🔙  Kembali ke Panel", callback_data=f"manage_{chat_id}")],
     ]
     return text, InlineKeyboardMarkup(keyboard_rows)
@@ -995,3 +1029,188 @@ async def page_newscore_privs(chat_id: int):
         f"Tap tombol untuk toggle ON/OFF hak akses admin yang akan diangkat otomatis."
     )
     return text, InlineKeyboardMarkup(buttons)
+
+
+async def page_newscore_bioadmin(chat_id: int):
+    """
+    Halaman pengaturan "Bio Admin Wajib" — sub-menu panel NewsCore.
+
+    Admin yang diangkat otomatis oleh NewsCore wajib memiliki teks ini
+    di bio Telegram mereka (boleh ada teks lain juga). Jika tidak ada
+    saat bio mereka dicek (lewat typing di grup / bertemu userbot di VC)
+    → bot utama akan unadmin mereka otomatis.
+
+    Owner/admin (dengan hak Ubah Info Grup) bisa menekan "Kosongkan" agar
+    syarat ini dimatikan sepenuhnya — admin NewsCore boleh punya bio apa
+    saja, termasuk kosong.
+    """
+    from database import ns_get_config
+    cfg                = await ns_get_config(chat_id)
+    bio_admin_text     = (cfg.get("bio_admin_text") or "").strip()
+    bio_admin_required = cfg.get("bio_admin_required", True)
+
+    if not bio_admin_required:
+        status_block = (
+            "➖ <b>Tidak diwajibkan.</b>\n"
+            "Syarat ini sudah dikosongkan — admin NewsCore boleh punya bio "
+            "apa saja (termasuk kosong), tidak akan di-unadmin karena bio."
+        )
+    elif bio_admin_text:
+        status_block = f"✅ <b>Teks aktif saat ini:</b>\n<code>{_html_escape(bio_admin_text)}</code>"
+    else:
+        status_block = (
+            "❌ <b>Belum diisi.</b>\n"
+            "Selama kosong, <u>SEMUA admin NewsCore akan di-unadmin</u> "
+            "begitu bio mereka dicek — karena syarat dianggap wajib namun "
+            "tidak mungkin terpenuhi tanpa teks.\n\n"
+            "<i>Tekan 'Kosongkan' jika ingin syarat ini dimatikan sepenuhnya.</i>"
+        )
+
+    text = (
+        f"📝 <b>BIO ADMIN WAJIB — NewsCore</b>\n"
+        f"<code>Grup: {chat_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>📌 APA INI?</b>\n"
+        f"Admin yang <b>diangkat otomatis oleh NewsCore</b> wajib mencantumkan "
+        f"teks tertentu di bio profil Telegram mereka (boleh ada teks lain juga, "
+        f"asal teks wajib ini ikut tercantum).\n\n"
+        f"Jika saat dicek (lewat ketikan di grup atau saat bertemu userbot di "
+        f"obrolan suara) admin tidak memenuhi syarat ini → bot utama akan "
+        f"<b>melepas status admin</b> mereka secara otomatis, lalu mengirim log "
+        f"ke channel log &amp; Log Aktivitas grup.\n\n"
+        f"<i>Pesan mereka TIDAK dihapus dan mic VC TIDAK dimute — hanya status "
+        f"admin yang dicabut. Ini hanya berlaku untuk admin yang diangkat oleh "
+        f"NewsCore, bukan admin manual/owner asli grup.</i>\n\n"
+        f"<i>Hanya admin grup dengan hak 'Ubah Info Grup' (atau owner) yang "
+        f"bisa mengatur fitur ini.</i>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{status_block}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✏️  Ubah Teks Wajib" if bio_admin_text else "✏️  Isi Teks Wajib",
+            callback_data=f"ns_bioadmin_set_{chat_id}"
+        )],
+        [InlineKeyboardButton("🔙  Kembali ke NewsCore", callback_data=f"ns_panel_{chat_id}")],
+    ])
+    return text, keyboard
+
+
+async def page_newscore_admintitle(chat_id: int):
+    """
+    Halaman pengaturan "Titel Admin" — sub-menu panel NewsCore.
+
+    Titel ini (maks 16 UTF-16 code unit — batas asli Telegram untuk custom
+    title; setara ±16 huruf biasa, tapi font unik/Unicode style yang pakai
+    combining mark atau karakter di luar BMP bisa makan lebih dari 1 unit
+    per huruf terlihat) akan dipasang otomatis ke setiap admin yang
+    diangkat NewsCore setiap kali periode reset score berjalan, lewat
+    set_administrator_title. Jika kosong, sistem memakai
+    titel default bawaan ("Top Member N 👑").
+    """
+    from database import ns_get_config
+    cfg         = await ns_get_config(chat_id)
+    admin_title = (cfg.get("admin_title") or "").strip()
+
+    if admin_title:
+        status_block = f"✅ <b>Titel aktif saat ini:</b>\n<code>{_html_escape(admin_title)}</code>"
+    else:
+        status_block = (
+            "➖ <b>Belum diatur.</b>\n"
+            "Selama kosong, sistem akan memakai titel default bawaan "
+            "(<code>Top Member N 👑</code>) saat mengangkat admin NewsCore."
+        )
+
+    text = (
+        f"🎖️ <b>TITEL ADMIN — NewsCore</b>\n"
+        f"<code>Grup: {chat_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>📌 APA INI?</b>\n"
+        f"Titel (custom title) yang akan dipasang otomatis ke admin yang "
+        f"<b>diangkat NewsCore</b> setiap kali periode reset score berjalan.\n\n"
+        f"<i>Maksimal 16 karakter — ini batas asli Telegram untuk custom "
+        f"title admin. Font unik/Unicode style (mis. 𝐕𝐈𝐏, ᴠɪᴘ) didukung, "
+        f"tapi beberapa gaya font memakan lebih dari 1 unit per huruf "
+        f"terlihat, jadi muatannya bisa lebih pendek dari perkiraan.</i>\n\n"
+        f"<i>Hanya admin grup dengan hak 'Ubah Info Grup' (atau owner) yang "
+        f"bisa mengatur fitur ini.</i>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{status_block}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "✏️  Ubah Titel" if admin_title else "✏️  Isi Titel",
+            callback_data=f"ns_admintitle_set_{chat_id}"
+        )],
+        [InlineKeyboardButton("🔙  Kembali ke NewsCore", callback_data=f"ns_panel_{chat_id}")],
+    ])
+    return text, keyboard
+
+
+async def page_newscore_autotitle(chat_id: int):
+    """
+    Halaman pengaturan "Auto Title Member" — sub-menu panel NewsCore.
+
+    Memasang tag (BUKAN custom title admin — beda mekanisme) ke member
+    NON-admin secara otomatis berdasar rank leaderboard typing NewsCore,
+    tiap kali periode reset berjalan (bareng ns_do_reset()).
+
+    Mapping rank -> nama: rank 1-5 pakai nama urutan ke-1, rank 6-10 pakai
+    nama urutan ke-2, dst, hingga maksimal 10 nama (rank 1-50). Dipasang
+    via Bot API setChatMemberTag — lihat core/member_tag.py untuk detail
+    kenapa ini lewat HTTP request manual, bukan method Pyrogram langsung.
+    """
+    from database import ns_get_config
+    cfg     = await ns_get_config(chat_id)
+    enabled = cfg.get("auto_title_enabled", False)
+    names   = [n for n in cfg.get("auto_title_names", []) if n and n.strip()]
+
+    if names:
+        preview_lines = []
+        for idx, name in enumerate(names):
+            lo = idx * 5 + 1
+            hi = lo + 4
+            preview_lines.append(f"   Rank {lo}-{hi}  →  <code>{_html_escape(name)}</code>")
+        names_block = "\n".join(preview_lines)
+        status_block = f"✅ <b>{len(names)} nama diatur:</b>\n{names_block}"
+    else:
+        status_block = (
+            "➖ <b>Belum ada nama diisi.</b>\n"
+            "Fitur tidak akan memasang tag apapun sampai nama diisi, "
+            "meski statusnya Aktif."
+        )
+
+    text = (
+        f"🏷️ <b>AUTO TITLE MEMBER — NewsCore</b>\n"
+        f"<code>Grup: {chat_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"<b>📌 APA INI?</b>\n"
+        f"Tag otomatis untuk <b>member biasa (non-admin)</b> berdasar rank "
+        f"leaderboard typing NewsCore, dipasang tiap periode reset.\n\n"
+        f"<b>📊 CARA KERJA:</b>\n"
+        f"Tiap kelompok <b>5 rank teratas</b> dapat 1 nama. Rank 1-5 pakai "
+        f"nama pertama yang kamu isi, rank 6-10 pakai nama kedua, dan "
+        f"seterusnya — hingga maksimal <b>10 nama</b> (cover rank 1-50).\n\n"
+        f"<i>Member di luar 50 rank teratas, atau di luar jumlah nama yang "
+        f"diisi, tidak mendapat tag apapun.</i>\n\n"
+        f"<i>Bot harus admin grup dengan hak 'Kelola Tag Member' "
+        f"(can_manage_tags) agar fitur ini bisa berjalan.</i>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{'🟢' if enabled else '🔴'} <b>Status:</b> <code>{'AKTIF' if enabled else 'NONAKTIF'}</code>\n\n"
+        f"{status_block}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"{'🔴 Nonaktifkan' if enabled else '🟢 Aktifkan'}",
+            callback_data=f"ns_autotitle_toggle_{chat_id}"
+        )],
+        [InlineKeyboardButton(
+            "✏️  Ubah Custom Title" if names else "✏️  Isi Custom Title",
+            callback_data=f"ns_autotitle_set_{chat_id}"
+        )],
+        [InlineKeyboardButton("🔙  Kembali ke NewsCore", callback_data=f"ns_panel_{chat_id}")],
+    ])
+    return text, keyboard

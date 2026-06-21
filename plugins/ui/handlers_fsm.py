@@ -17,6 +17,7 @@ Bug fix:
 import asyncio
 import re
 import unicodedata
+from html import escape as _html_escape
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from pyrogram.enums import ParseMode
@@ -54,6 +55,56 @@ async def _safe_edit_id(client, chat_id, msg_id, text, keyboard=None):
         pass
     except Exception as e:
         print(f"[_safe_edit_id] {e}")
+
+
+def _split_graphemes(s: str) -> list:
+    """
+    Pecah string jadi grapheme cluster sederhana: tiap base character beserta
+    semua combining mark (diakritik) yang menyertainya dihitung sebagai SATU
+    unit visual. Dipakai untuk menampilkan "jumlah karakter terlihat" yang
+    akurat untuk font unik (mis. ᴠͥɪͣᴘͫ) yang sebenarnya terdiri dari huruf
+    dasar + combining mark Unicode (bukan 1 codepoint per huruf).
+
+    Tidak butuh library eksternal (`regex`) — cukup unicodedata.combining().
+    """
+    clusters = []
+    cur = ""
+    for ch in s:
+        if unicodedata.combining(ch) and cur:
+            cur += ch
+        else:
+            if cur:
+                clusters.append(cur)
+            cur = ch
+    if cur:
+        clusters.append(cur)
+    return clusters
+
+
+def _utf16_units(s: str) -> int:
+    """
+    Hitung panjang string dalam UTF-16 code units — ini satuan yang
+    sebenarnya dipakai Telegram untuk membatasi custom title admin (maks 16).
+    Karakter di luar BMP (banyak dipakai di font unik seperti Mathematical
+    Bold 𝐕𝐈𝐏, Fraktur, dll) makan 2 code unit per karakter meski cuma
+    1 codepoint Python — jadi tidak bisa diukur dengan len() biasa.
+    """
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _truncate_to_utf16_limit(s: str, limit: int) -> str:
+    """
+    Potong string ke batas UTF-16 `limit` tanpa merusak grapheme cluster —
+    tidak akan memotong base character lepas dari combining mark-nya.
+    """
+    out, total = "", 0
+    for c in _split_graphemes(s):
+        c_len = _utf16_units(c)
+        if total + c_len > limit:
+            break
+        out += c
+        total += c_len
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,7 +415,184 @@ async def _handle_ns_fsm_input(client, message: Message, user_id: int):
     except Exception:
         pass
 
+    # Validasi hak akses terpusat (defense in depth): seluruh sub-menu
+    # NewsCore — termasuk semua input FSM-nya — hanya untuk admin dengan
+    # hak "Ubah Info Grup" (atau owner). Pintu masuk callback-nya sendiri
+    # sudah dikunci di handlers_dm.py, tapi dicek ulang di sini juga
+    # supaya tidak ada state FSM basi/sisa yang bisa dieksploitasi.
+    if not await _adm_sess.has_change_info_privilege(client, user_id, chat_id):
+        _ns_fsm.pop(user_id, None)
+        if msg_id:
+            await _safe_edit_id(
+                client, message.chat.id, msg_id,
+                "<b>❖ AKSES DITOLAK ❖</b>\n\n"
+                "⛔ <b>Pengaturan NewsCore</b> hanya bisa diakses oleh admin "
+                "dengan hak <b>'Ubah Info Grup'</b>.\n\n"
+                "<i>Minta admin lain yang memiliki hak tersebut, atau owner "
+                "grup, untuk mengatur fitur ini.</i>",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙  Kembali", callback_data=f"manage_{chat_id}")]]),
+            )
+        return
+
     try:
+        # ── BIO ADMIN WAJIB: simpan teks literal apa adanya (BUKAN regex,
+        # tidak lewat pipeline_pembersihan/regex_utils — murni substring match
+        # case-insensitive, lihat core/ns_bio_guard.py) ───────────────────────
+        if action == "ns_input_bioadmin_text":
+            if not text:
+                await _safe_edit_id(
+                    client, message.chat.id, msg_id,
+                    "📝 <b>BIO ADMIN WAJIB — Ketik Teks Baru</b>\n\n"
+                    "❌ Teks tidak boleh kosong.\n"
+                    "Ketik teks yang wajib ada di bio admin NewsCore.\n\n"
+                    "<i>Ketik /batal untuk membatalkan.</i>",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Batal", callback_data=f"ns_bioadmin_{chat_id}")]]),
+                )
+                return
+            if len(text) > 200:
+                await _safe_edit_id(
+                    client, message.chat.id, msg_id,
+                    "📝 <b>BIO ADMIN WAJIB — Ketik Teks Baru</b>\n\n"
+                    "❌ Teks terlalu panjang (maks 200 karakter).\n\n"
+                    "<i>Ketik /batal untuk membatalkan.</i>",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Batal", callback_data=f"ns_bioadmin_{chat_id}")]]),
+                )
+                return
+
+            await ns_update(chat_id, {"bio_admin_text": text, "bio_admin_required": True})
+            _ns_fsm.pop(user_id, None)
+
+            await _safe_edit_id(
+                client, message.chat.id, msg_id,
+                "✅ <b>Teks wajib disimpan!</b>\n\n"
+                f"<code>{_html_escape(text)}</code>\n\n"
+                "<i>Kembali ke panel…</i>",
+            )
+            await asyncio.sleep(1.5)
+            from plugins.ui.pages import page_newscore_bioadmin
+            text_panel, keyboard_panel = await page_newscore_bioadmin(chat_id)
+            await _safe_edit_id(client, message.chat.id, msg_id, text_panel, keyboard_panel)
+            return
+
+        # ── TITEL ADMIN: titel custom (maks 16 UTF-16 code units, batas asli
+        # Telegram untuk custom title — BUKAN 16 huruf biasa) yang dipasang
+        # ke admin yang diangkat NewsCore tiap periode reset, lihat
+        # ns_do_reset() di newscore.py. Mendukung font unik/Unicode style
+        # (combining mark, karakter di luar BMP seperti Mathematical Bold)
+        # lewat _utf16_units() dan _split_graphemes() di atas ──────────────
+        if action == "ns_input_admintitle_text":
+            if not text:
+                await _safe_edit_id(
+                    client, message.chat.id, msg_id,
+                    "🎖️ <b>TITEL ADMIN — Ketik Teks Baru</b>\n\n"
+                    "❌ Teks tidak boleh kosong.\n"
+                    "Ketik titel yang akan dipasang ke admin NewsCore.\n\n"
+                    "<i>Maksimal 16 karakter (font unik/Unicode didukung).</i>\n\n"
+                    "<i>Ketik /batal untuk membatalkan.</i>",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Batal", callback_data=f"ns_admintitle_{chat_id}")]]),
+                )
+                return
+
+            units = _utf16_units(text)
+            if units > 16:
+                graphemes  = _split_graphemes(text)
+                suggestion = _truncate_to_utf16_limit(text, 16)
+                await _safe_edit_id(
+                    client, message.chat.id, msg_id,
+                    "🎖️ <b>TITEL ADMIN — Ketik Teks Baru</b>\n\n"
+                    f"❌ Teks terlalu panjang untuk Telegram "
+                    f"(<code>{units}</code>/16 — Telegram menghitung font unik/Unicode "
+                    f"per code unit, bukan per huruf terlihat).\n"
+                    f"   Jumlah karakter terlihat: <code>{len(graphemes)}</code>\n\n"
+                    f"💡 Versi yang pas batas:\n<code>{_html_escape(suggestion)}</code>\n\n"
+                    "Ketik ulang teks yang lebih pendek, atau kirim ulang "
+                    "<i>persis</i> teks di atas untuk memakainya.\n\n"
+                    "<i>Ketik /batal untuk membatalkan.</i>",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Batal", callback_data=f"ns_admintitle_{chat_id}")]]),
+                )
+                return
+
+            await ns_update(chat_id, {"admin_title": text})
+            _ns_fsm.pop(user_id, None)
+
+            await _safe_edit_id(
+                client, message.chat.id, msg_id,
+                "✅ <b>Titel admin disimpan!</b>\n\n"
+                f"<code>{_html_escape(text)}</code>\n\n"
+                "<i>Kembali ke panel…</i>",
+            )
+            await asyncio.sleep(1.5)
+            from plugins.ui.pages import page_newscore_admintitle
+            text_panel, keyboard_panel = await page_newscore_admintitle(chat_id)
+            await _safe_edit_id(client, message.chat.id, msg_id, text_panel, keyboard_panel)
+            return
+
+        # ── AUTO TITLE MEMBER: 10 nama berurutan dipisah spasi, dipakai
+        # sebagai tag per kelompok 5-rank leaderboard typing NewsCore.
+        # Dipasang via Bot API setChatMemberTag (lihat core/member_tag.py),
+        # bukan set_administrator_title (itu khusus admin, bukan member) ──
+        if action == "ns_input_autotitle_names":
+            if not text:
+                await _safe_edit_id(
+                    client, message.chat.id, msg_id,
+                    "🏷️ <b>AUTO TITLE MEMBER — Ketik 10 Nama</b>\n\n"
+                    "❌ Teks tidak boleh kosong.\n"
+                    "Ketik 10 nama berurutan, dipisahkan spasi.\n\n"
+                    "<i>Ketik /batal untuk membatalkan.</i>",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Batal", callback_data=f"ns_autotitle_{chat_id}")]]),
+                )
+                return
+
+            names = text.split()
+
+            if len(names) > 10:
+                await _safe_edit_id(
+                    client, message.chat.id, msg_id,
+                    "🏷️ <b>AUTO TITLE MEMBER — Ketik 10 Nama</b>\n\n"
+                    f"❌ Terlalu banyak nama (<code>{len(names)}</code>/10 maksimal).\n"
+                    "Maksimal <b>10 nama</b>, dipisahkan spasi.\n\n"
+                    "<i>Ketik ulang, atau /batal untuk membatalkan.</i>",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Batal", callback_data=f"ns_autotitle_{chat_id}")]]),
+                )
+                return
+
+            # Validasi panjang per-nama: batas sama dengan custom title
+            # Telegram (16 UTF-16 code unit), karena dipasang sebagai tag.
+            too_long = [(i, n, _utf16_units(n)) for i, n in enumerate(names, 1) if _utf16_units(n) > 16]
+            if too_long:
+                detail = "\n".join(
+                    f"   Nama ke-{i}: <code>{_html_escape(n)}</code> ({units}/16)"
+                    for i, n, units in too_long
+                )
+                await _safe_edit_id(
+                    client, message.chat.id, msg_id,
+                    "🏷️ <b>AUTO TITLE MEMBER — Ketik 10 Nama</b>\n\n"
+                    f"❌ Ada nama yang lebih dari 16 karakter:\n{detail}\n\n"
+                    "Setiap nama maksimal <b>16 karakter</b> (batas tag Telegram).\n\n"
+                    "<i>Ketik ulang semua 10 nama, atau /batal untuk membatalkan.</i>",
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🚫 Batal", callback_data=f"ns_autotitle_{chat_id}")]]),
+                )
+                return
+
+            await ns_update(chat_id, {"auto_title_names": names})
+            _ns_fsm.pop(user_id, None)
+
+            preview = "\n".join(
+                f"   Rank {idx*5+1}-{idx*5+5}  →  <code>{_html_escape(n)}</code>"
+                for idx, n in enumerate(names)
+            )
+            await _safe_edit_id(
+                client, message.chat.id, msg_id,
+                "✅ <b>Auto Title Member disimpan!</b>\n\n"
+                f"{preview}\n\n"
+                "<i>Kembali ke panel…</i>",
+            )
+            await asyncio.sleep(1.8)
+            from plugins.ui.pages import page_newscore_autotitle
+            text_panel, keyboard_panel = await page_newscore_autotitle(chat_id)
+            await _safe_edit_id(client, message.chat.id, msg_id, text_panel, keyboard_panel)
+            return
+
         # ── LANGKAH 1A: input N hari ─────────────────────────────────────────
         if action == "ns_step1_day":
             if not text.isdigit() or int(text) < 1:
